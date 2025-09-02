@@ -1,0 +1,51 @@
+{
+  "name": "salemaljebaly/mstore-api-optimizer",
+  "description": "WordPress plugin that dramatically optimizes MStore API performance for large shopping carts",
+  "type": "wordpress-plugin",
+  "keywords": [
+    "wordpress",
+    "plugin",
+    "mstore",
+    "performance",
+    "woocommerce",
+    "flutter",
+    "api",
+    "optimization"
+  ],
+  "homepage": "https://github.com/salemaljebaly/mstore-api-optimizer",
+  "license": "GPL-2.0-or-later",
+  "authors": [
+    {
+      "name": "Salem Aljebaly",
+      "email": "salem@lamah.co",
+      "homepage": "https://lamah.co",
+      "role": "Developer"
+    }
+  ],
+  "support": {
+    "issues": "https://github.com/salemaljebaly/mstore-api-optimizer/issues",
+    "source": "https://github.com/salemaljebaly/mstore-api-optimizer"
+  },
+  "require": {
+    "php": ">=7.4"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^9.0",
+    "wp-coding-standards/wpcs": "^2.3"
+  },
+  "autoload": {
+    "psr-4": {
+      "MStorePerformanceFix\\": "src/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "phpcs": "phpcs --standard=WordPress .",
+    "phpcbf": "phpcbf --standard=WordPress ."
+  },
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    }
+  }
+}
