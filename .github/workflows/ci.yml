@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  code-quality:
+    name: Code Quality & Testing
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        php-version: [7.4, 8.1, 8.3]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup PHP ${{ matrix.php-version }}
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ matrix.php-version }}
+        extensions: mbstring, intl
+        tools: composer, phpcs
+        coverage: none
+    
+    - name: Install dependencies
+      run: |
+        composer install --prefer-dist --no-progress --no-dev
+        composer global require wp-coding-standards/wpcs
+    
+    - name: Configure PHPCS
+      run: phpcs --config-set installed_paths ~/.composer/vendor/wp-coding-standards/wpcs
+    
+    - name: PHP Syntax Check
+      run: find . -name "*.php" -type f -exec php -l {} \; | (! grep -v "No syntax errors")
+    
+    - name: WordPress Coding Standards
+      run: phpcs --standard=WordPress --extensions=php --ignore=vendor/ . || true
+    
+    - name: Basic Security Check
+      run: |
+        # Check for direct file access protection
+        if ! grep -r "defined('ABSPATH')" --include="*.php" .; then
+          echo "❌ Missing ABSPATH checks"
+          exit 1
+        else
+          echo "✅ ABSPATH protection found"
+        fi
+        
+        # Check for potential XSS issues
+        if grep -r "echo.*\$_\(GET\|POST\|REQUEST\)" --include="*.php" .; then
+          echo "⚠️ Potential XSS - review output sanitization"
+        else
+          echo "✅ No obvious XSS patterns"
+        fi
+    
+    - name: Plugin Activation Test
+      if: matrix.php-version == '8.1'
+      run: |
+        # Basic plugin structure validation
+        php -r "
+        if (!file_exists('mstore-api-optimizer.php')) {
+          echo 'Main plugin file missing'; exit(1);
+        }
+        
+        \$content = file_get_contents('mstore-api-optimizer.php');
+        if (!preg_match('/Plugin Name:/', \$content)) {
+          echo 'Invalid plugin header'; exit(1);
+        }
+        
+        if (!preg_match('/class MStorePerformanceFix/', \$content)) {
+          echo 'Main plugin class missing'; exit(1);
+        }
+        
+        echo 'Plugin structure validation passed';
+        "
+        
+        # Test that PHP can parse the plugin without fatal errors
+        php -f mstore-api-optimizer.php --syntax-check

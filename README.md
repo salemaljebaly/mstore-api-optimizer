@@ -142,7 +142,6 @@ A: This plugin maintains full MStore API compatibility. If issues occur, tempora
 
 **Salem Aljebaly**
 - GitHub: [@salemaljebaly](https://github.com/salemaljebaly)
-- Website: [lamah.co](https://lamah.co)
 
 ## 📄 License
 

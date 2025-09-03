@@ -5,7 +5,7 @@ Plugin URI: https://github.com/salemaljebaly/mstore-api-optimizer
 Description: Dramatically improves MStore API performance for large shopping carts, reducing response times from 30+ seconds to under 1 second.
 Version: 1.0.0
 Author: Salem Aljebaly
-Author URI: https://lamah.co
+Author URI: https://github.com/salemaljebaly
 License: GPL v2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 Text Domain: mstore-api-optimizer

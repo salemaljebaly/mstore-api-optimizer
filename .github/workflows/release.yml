@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Get version from tag
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+    
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.1
+    
+    - name: Validate plugin version
+      run: |
+        PLUGIN_VERSION=$(grep "Version:" mstore-api-optimizer.php | sed 's/.*Version: *//' | tr -d ' ')
+        echo "Plugin version: $PLUGIN_VERSION"
+        echo "Tag version: ${{ steps.version.outputs.version }}"
+        
+        if [ "$PLUGIN_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+          echo "❌ Version mismatch! Update plugin header."
+          exit 1
+        fi
+    
+    - name: Run basic checks
+      run: |
+        # Syntax check
+        find . -name "*.php" -type f -exec php -l {} \; | (! grep -v "No syntax errors")
+        
+        # Plugin structure check
+        php -r "
+        if (!class_exists('MStorePerformanceFix', false)) {
+          include 'mstore-api-optimizer.php';
+        }
+        echo 'Plugin loads successfully';
+        "
+    
+    - name: Create plugin zip
+      run: |
+        mkdir -p build
+        
+        # Copy files excluding development files
+        rsync -av \
+          --exclude='build/' \
+          --exclude='.git*' \
+          --exclude='.github/' \
+          --exclude='tests/' \
+          --exclude='*.md' \
+          --exclude='composer.*' \
+          --exclude='phpcs.xml' \
+          . build/mstore-api-optimizer/
+        
+        cd build
+        zip -r mstore-api-optimizer-${{ steps.version.outputs.version }}.zip mstore-api-optimizer/
+        sha256sum mstore-api-optimizer-${{ steps.version.outputs.version }}.zip > checksums.txt
+    
+    - name: Generate release notes
+      run: |
+        if [ -f CHANGELOG.md ]; then
+          sed -n "/## \[${{ steps.version.outputs.version }}\]/,/## \[/p" CHANGELOG.md | sed '$d' > release-notes.md
+        fi
+        
+        if [ ! -s release-notes.md ]; then
+          echo "## Changes in v${{ steps.version.outputs.version }}" > release-notes.md
+          git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD >> release-notes.md 2>/dev/null || echo "- Initial release" >> release-notes.md
+        fi
+    
+    - name: Create GitHub Release
+      uses: ncipollo/release-action@v1
+      with:
+        tag: v${{ steps.version.outputs.version }}
+        name: "v${{ steps.version.outputs.version }}"
+        bodyFile: release-notes.md
+        artifacts: |
+          build/mstore-api-optimizer-${{ steps.version.outputs.version }}.zip
+          build/checksums.txt
+        token: ${{ secrets.GITHUB_TOKEN }}

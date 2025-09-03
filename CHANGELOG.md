@@ -67,5 +67,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For support, feature requests, or bug reports:
 - **GitHub Issues**: https://github.com/salemaljebaly/mstore-api-optimizer/issues
-- **Author Website**: https://lamah.co
-- **Email**: salem@lamah.co
+- **Author Website**: https://github.com/salemaljebaly
+- **Email**: salemaljebaly@gmail.com

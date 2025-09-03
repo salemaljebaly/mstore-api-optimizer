@@ -130,7 +130,7 @@ Initial release. Install to immediately optimize MStore API performance by 95%+.
 For support and feature requests:
 
 * GitHub: https://github.com/salemaljebaly/mstore-api-optimizer
-* Website: https://lamah.co
+* Website: https://github.com/salemaljebaly
 
 == Technical Details ==
 
