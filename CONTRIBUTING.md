@@ -150,7 +150,7 @@ When contributing:
 If you discover security vulnerabilities:
 
 1. **Do NOT create public issues**
-2. **Email directly**: salem@lamah.co
+2. **Email directly**: salemaljebaly@gmail.com
 3. **Provide detailed information**
 4. **Allow time for patching** before disclosure
 
