@@ -33,11 +33,7 @@
     "phpunit/phpunit": "^9.0",
     "wp-coding-standards/wpcs": "^2.3"
   },
-  "autoload": {
-    "psr-4": {
-      "MStorePerformanceFix\\": "src/"
-    }
-  },
+  "autoload": {},
   "scripts": {
     "test": "phpunit",
     "phpcs": "phpcs --standard=WordPress .",
