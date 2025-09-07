@@ -3,7 +3,7 @@
 Plugin Name: MStore API Optimizer
 Plugin URI: https://github.com/salemaljebaly/mstore-api-optimizer
 Description: Dramatically improves MStore API performance for large shopping carts, reducing response times from 30+ seconds to under 1 second.
-Version: 1.0.0
+Version: 1.0.2
 Author: Salem Aljebaly
 Author URI: https://github.com/salemaljebaly
 License: GPL v2 or later
@@ -125,9 +125,16 @@ class MStorePerformanceFix {
         $cart_time = microtime(true) - $cart_start_time;
         error_log("MStore API Optimizer DEBUG: Cart processing took " . round($cart_time, 3) . " seconds");
         
+        // Get stock adjustments count for logging
+        $stock_adjustments = WC()->session->get('mstore_stock_adjustments', array());
+        $stock_count = count($stock_adjustments);
+        
         if ($failed_items > 0) {
-            return new WP_Error('invalid_item', "Failed to add {$failed_items} items", array('status' => 400));
+            error_log("MStore API Optimizer DEBUG: {$failed_items} items failed to add, {$stock_count} stock issues handled");
         }
+        
+        // Continue with shipping calculation even if some items failed
+        // This allows users to get shipping for available items
 
         if(isset($body['coupon_lines']) && is_array($body['coupon_lines']) && count($body['coupon_lines']) > 0){
             WC()->cart->apply_coupon($body['coupon_lines'][0]['code']);
@@ -193,10 +200,55 @@ class MStorePerformanceFix {
             return new WP_Error('no_shipping', 'No Shipping', array('required_shipping' => $required_shipping));
         }
         
+        // Check for stock adjustments
+        $stock_adjustments = WC()->session->get('mstore_stock_adjustments', array());
+        WC()->session->set('mstore_stock_adjustments', null); // Clear after reading
+        
         // DEBUG: Total execution time
         $total_time = microtime(true) - $debug_start_time;
         error_log("MStore API Optimizer DEBUG: Total shipping_methods execution time " . round($total_time, 3) . " seconds for {$item_count} items");
         error_log("MStore API Optimizer DEBUG: Found " . count($results) . " shipping methods");
+        if (!empty($stock_adjustments)) {
+            error_log("MStore API Optimizer DEBUG: " . count($stock_adjustments) . " stock adjustments made");
+        }
+        
+        // Return results with stock adjustment info if needed
+        if (!empty($stock_adjustments)) {
+            // Generate user-friendly message based on stock issue types
+            $out_of_stock_count = 0;
+            $limited_stock_count = 0;
+            $not_found_count = 0;
+            
+            foreach ($stock_adjustments as $adjustment) {
+                $reason = $adjustment['reason'] ?? 'unknown';
+                if ($reason === 'out_of_stock') {
+                    $out_of_stock_count++;
+                } elseif ($reason === 'limited_stock') {
+                    $limited_stock_count++;
+                } elseif ($reason === 'not_found') {
+                    $not_found_count++;
+                }
+            }
+            
+            $message_parts = [];
+            if ($out_of_stock_count > 0) {
+                $message_parts[] = $out_of_stock_count . "_items_out_of_stock";
+            }
+            if ($limited_stock_count > 0) {
+                $message_parts[] = $limited_stock_count . "_items_limited_stock";
+            }
+            if ($not_found_count > 0) {
+                $message_parts[] = $not_found_count . "_items_not_found";
+            }
+            
+            $message = implode(', ', $message_parts);
+            
+            return array(
+                'shipping_methods' => $results,
+                'stock_adjustments' => $stock_adjustments,
+                'message' => $message
+            );
+        }
         
         return $results;
     }
@@ -298,10 +350,11 @@ class MStorePerformanceFix {
     
     private function batch_add_items_to_cart($line_items) {
         $failed_items = 0;
+        $stock_issues = array();
         
         foreach ($line_items as $item) {
             $productId = absint($item['product_id']);
-            $quantity = intval($item['quantity']);
+            $requested_qty = intval($item['quantity']);
             $variationId = isset($item['variation_id']) ? absint($item['variation_id']) : 0;
             
             $attributes = array();
@@ -313,10 +366,77 @@ class MStorePerformanceFix {
                 }
             }
             
-            $result = WC()->cart->add_to_cart($productId, $quantity, $variationId, $attributes);
-            if (!$result) {
-                $failed_items++;
+            // Check product availability first to avoid unnecessary add_to_cart attempts
+            $product = wc_get_product($variationId ?: $productId);
+            
+            if (!$product) {
+                // Product doesn't exist - skip it entirely
+                $stock_issues[] = array(
+                    'product_id' => $productId,
+                    'requested' => $requested_qty,
+                    'available' => 0,
+                    'product_name' => 'Product not found',
+                    'reason' => 'not_found'
+                );
+                error_log("MStore API Optimizer: Skipped non-existent product {$productId}");
+                continue;
             }
+            
+            if (!$product->is_in_stock()) {
+                // Product is out of stock - skip it entirely and notify user
+                $stock_issues[] = array(
+                    'product_id' => $productId,
+                    'requested' => $requested_qty,
+                    'available' => 0,
+                    'product_name' => $product->get_name(),
+                    'reason' => 'out_of_stock'
+                );
+                error_log("MStore API Optimizer: Skipped out-of-stock product {$productId}");
+                continue;
+            }
+            
+            $available = $product->get_stock_quantity();
+            if ($available !== null && $available < $requested_qty) {
+                // Limited stock - try with available quantity
+                if ($available > 0) {
+                    $result = WC()->cart->add_to_cart($productId, $available, $variationId, $attributes);
+                    if ($result) {
+                        $stock_issues[] = array(
+                            'product_id' => $productId,
+                            'requested' => $requested_qty,
+                            'available' => $available,
+                            'product_name' => $product->get_name(),
+                            'reason' => 'limited_stock'
+                        );
+                        error_log("MStore API Optimizer: Adjusted quantity for product {$productId} from {$requested_qty} to {$available}");
+                    } else {
+                        $failed_items++;
+                        error_log("MStore API Optimizer: Failed to add product {$productId} even with available quantity {$available}");
+                    }
+                } else {
+                    // Available is 0, treat as out of stock
+                    $stock_issues[] = array(
+                        'product_id' => $productId,
+                        'requested' => $requested_qty,
+                        'available' => 0,
+                        'product_name' => $product->get_name(),
+                        'reason' => 'out_of_stock'
+                    );
+                    error_log("MStore API Optimizer: Skipped zero-stock product {$productId}");
+                }
+            } else {
+                // Try original quantity (unlimited stock or sufficient stock)
+                $result = WC()->cart->add_to_cart($productId, $requested_qty, $variationId, $attributes);
+                if (!$result) {
+                    $failed_items++;
+                    error_log("MStore API Optimizer: Failed to add product {$productId} with sufficient stock - other error");
+                }
+            }
+        }
+        
+        // Store stock adjustments for the response
+        if (!empty($stock_issues)) {
+            WC()->session->set('mstore_stock_adjustments', $stock_issues);
         }
         
         return $failed_items;
