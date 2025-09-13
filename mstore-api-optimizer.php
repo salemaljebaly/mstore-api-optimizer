@@ -3,7 +3,7 @@
 Plugin Name: MStore API Optimizer
 Plugin URI: https://github.com/salemaljebaly/mstore-api-optimizer
 Description: Dramatically improves MStore API performance for large shopping carts, reducing response times from 30+ seconds to under 1 second.
-Version: 1.0.2
+Version: 1.0.3
 Author: Salem Aljebaly
 Author URI: https://github.com/salemaljebaly
 License: GPL v2 or later
@@ -316,10 +316,9 @@ class MStorePerformanceFix {
         
         $cart_time = microtime(true) - $cart_start_time;
         error_log("MStore API Optimizer DEBUG: Cart processing took " . round($cart_time, 3) . " seconds");
-        
-        if ($failed_items > 0) {
-            return new WP_Error('invalid_item', "Failed to add {$failed_items} items", array('status' => 400));
-        }
+
+        // Tolerate partial failures: do not hard-fail when some items cannot be added
+        // Only handle the "no valid items" case after we gather available payment methods
         
         if(isset($body['coupon_lines']) && is_array($body['coupon_lines']) && count($body['coupon_lines']) > 0){
             WC()->cart->apply_coupon($body['coupon_lines'][0]['code']);
@@ -340,6 +339,20 @@ class MStorePerformanceFix {
             $results[] = ["id" => $value->id, "title" => $value->title, "method_title" => $value->method_title, "description" => $value->description];
         }
         
+        // If cart ended up with no valid items (e.g., all deleted/invalid), return an empty list
+        $added_items_count = is_object(WC()->cart) ? count(WC()->cart->get_cart()) : 0;
+        if ($added_items_count === 0) {
+            error_log("MStore API Optimizer DEBUG: No valid items remain in cart (payment_methods) – returning empty list");
+            $results = array();
+        }
+
+        // Clear any recorded stock adjustments from session (response remains a flat list for app compatibility)
+        $stock_adjustments = WC()->session->get('mstore_stock_adjustments', array());
+        WC()->session->set('mstore_stock_adjustments', null);
+        if (!empty($stock_adjustments)) {
+            error_log("MStore API Optimizer DEBUG: " . count($stock_adjustments) . " stock adjustments made (payment_methods)");
+        }
+
         // DEBUG: Total execution time
         $total_time = microtime(true) - $debug_start_time;
         error_log("MStore API Optimizer DEBUG: Total payment_methods execution time " . round($total_time, 3) . " seconds for {$item_count} items");
@@ -369,16 +382,18 @@ class MStorePerformanceFix {
             // Check product availability first to avoid unnecessary add_to_cart attempts
             $product = wc_get_product($variationId ?: $productId);
             
-            if (!$product) {
-                // Product doesn't exist - skip it entirely
+            // Treat deleted/trashed/unpublished/unpurchasable items like out-of-stock (skip and record)
+            if (!$product || (method_exists($product, 'exists') && !$product->exists()) ||
+                (method_exists($product, 'get_status') && $product->get_status() !== 'publish') ||
+                (method_exists($product, 'is_purchasable') && !$product->is_purchasable()) ) {
                 $stock_issues[] = array(
                     'product_id' => $productId,
                     'requested' => $requested_qty,
                     'available' => 0,
-                    'product_name' => 'Product not found',
+                    'product_name' => $product ? $product->get_name() : 'Product not found',
                     'reason' => 'not_found'
                 );
-                error_log("MStore API Optimizer: Skipped non-existent product {$productId}");
+                error_log("MStore API Optimizer: Skipped non-purchasable or non-existent product {$productId}");
                 continue;
             }
             
