@@ -2,8 +2,8 @@
 /*
 Plugin Name: MStore API Optimizer
 Plugin URI: https://github.com/salemaljebaly/mstore-api-optimizer
-Description: Dramatically improves MStore API performance for large shopping carts, reducing response times from 30+ seconds to under 1 second.
-Version: 1.0.3
+Description: Dramatically improves MStore API performance for large shopping carts and product search, reducing response times from 30+ seconds to under 1 second.
+Version: 1.1.0
 Author: Salem Aljebaly
 Author URI: https://github.com/salemaljebaly
 License: GPL v2 or later
@@ -47,24 +47,38 @@ class MStorePerformanceFix {
         if (!is_plugin_active('mstore-api/mstore-api.php')) {
             return;
         }
-        
+
         // Override the problematic endpoints
         add_filter('rest_pre_dispatch', array($this, 'override_endpoints'), 10, 3);
+
+        // Cache search results after they're sent
+        add_filter('rest_post_dispatch', array($this, 'cache_search_results'), 10, 3);
+
+        // Clear cache when products are updated
+        add_action('woocommerce_update_product', array($this, 'clear_search_cache'));
+        add_action('woocommerce_new_product', array($this, 'clear_search_cache'));
+        add_action('woocommerce_delete_product', array($this, 'clear_search_cache'));
     }
     
     public function override_endpoints($result, $server, $request) {
         $route = $request->get_route();
-        
+
         // Override shipping_methods endpoint
         if ($route === '/api/flutter_woo/shipping_methods') {
             return $this->handle_optimized_shipping_methods($request);
         }
-        
+
         // Override payment_methods endpoint
         if ($route === '/api/flutter_woo/payment_methods') {
             return $this->handle_optimized_payment_methods($request);
         }
-        
+
+        // Override products endpoint for search (with caching)
+        if ($route === '/api/flutter_woo/products' ||
+            preg_match('#^/wc/v[0-9]+/products$#', $route)) {
+            return $this->handle_optimized_product_search($request);
+        }
+
         // Let MStore handle all other endpoints
         return $result;
     }
@@ -481,6 +495,182 @@ class MStorePerformanceFix {
             }
         }
         $this->removed_actions = array(); // Clear for next use
+    }
+
+    /**
+     * Optimized product search with caching
+     * Checks cache first before allowing normal processing
+     *
+     * @param WP_REST_Request $request The REST API request
+     * @return mixed Cached results or null to continue normal processing
+     */
+    public function handle_optimized_product_search($request) {
+        $debug_start_time = microtime(true);
+
+        // Get search parameters
+        $params = $request->get_query_params();
+        $search_term = isset($params['search']) ? sanitize_text_field($params['search']) : '';
+
+        // Only cache if we have a search term (don't cache full catalog browsing)
+        if (empty($search_term)) {
+            return null; // Allow normal processing
+        }
+
+        $category = isset($params['category']) ? absint($params['category']) : 0;
+        $page = isset($params['page']) ? absint($params['page']) : 1;
+        $per_page = isset($params['per_page']) ? absint($params['per_page']) : 20;
+
+        // Create cache key based on search parameters
+        $cache_key = $this->get_search_cache_key($search_term, $category, $page, $per_page, $params);
+
+        // Try to get from cache first
+        $cached_result = $this->get_cache($cache_key);
+        if ($cached_result !== false) {
+            $cache_time = microtime(true) - $debug_start_time;
+            error_log(sprintf(
+                "MStore API Optimizer: Returned cached search results in %.2fms for '%s' (cat: %d, page: %d)",
+                $cache_time * 1000,
+                $search_term,
+                $category,
+                $page
+            ));
+            return $cached_result;
+        }
+
+        // Cache miss - log and allow normal processing
+        error_log(sprintf(
+            "MStore API Optimizer: Cache miss for search '%s' (cat: %d, page: %d) - processing query",
+            $search_term,
+            $category,
+            $page
+        ));
+
+        // Return null to allow MStore/WooCommerce to process normally
+        // Results will be cached by cache_search_results() after processing
+        return null;
+    }
+
+    /**
+     * Cache search results after they're sent to the client
+     *
+     * @param WP_REST_Response $response The REST API response
+     * @param WP_REST_Server $server The REST server instance
+     * @param WP_REST_Request $request The REST API request
+     * @return WP_REST_Response The unmodified response
+     */
+    public function cache_search_results($response, $server, $request) {
+        $route = $request->get_route();
+
+        // Only cache product search endpoints
+        if ($route !== '/api/flutter_woo/products' &&
+            !preg_match('#^/wc/v[0-9]+/products$#', $route)) {
+            return $response;
+        }
+
+        $params = $request->get_query_params();
+
+        // Only cache if we have a search term (don't cache full catalogs)
+        if (!isset($params['search']) || empty($params['search'])) {
+            return $response;
+        }
+
+        $search_term = sanitize_text_field($params['search']);
+        $category = isset($params['category']) ? absint($params['category']) : 0;
+        $page = isset($params['page']) ? absint($params['page']) : 1;
+        $per_page = isset($params['per_page']) ? absint($params['per_page']) : 20;
+
+        $cache_key = $this->get_search_cache_key($search_term, $category, $page, $per_page, $params);
+
+        // Smart cache expiration based on search term length
+        // Shorter searches (1-3 chars) = less specific = shorter cache (5 min)
+        // Longer searches (4+ chars) = more specific/popular = longer cache (30 min)
+        $search_length = mb_strlen($search_term);
+        $expiration = $search_length <= 3 ? 300 : 1800; // 5 min or 30 min
+
+        // Cache the response
+        $this->set_cache($cache_key, $response, $expiration);
+
+        error_log(sprintf(
+            "MStore API Optimizer: Cached search results for '%s' (length: %d, TTL: %ds, cat: %d, page: %d)",
+            $search_term,
+            $search_length,
+            $expiration,
+            $category,
+            $page
+        ));
+
+        return $response;
+    }
+
+    /**
+     * Generate cache key for search results
+     * Includes all parameters that affect the results
+     *
+     * @param string $search_term The search query
+     * @param int $category Category ID
+     * @param int $page Page number
+     * @param int $per_page Results per page
+     * @param array $params Additional query parameters
+     * @return string Cache key
+     */
+    private function get_search_cache_key($search_term, $category, $page, $per_page, $params) {
+        // Include important parameters that affect results
+        $key_parts = array(
+            'search' => $search_term,
+            'cat' => $category,
+            'page' => $page,
+            'per_page' => $per_page,
+            'lang' => isset($params['lang']) ? $params['lang'] : '',
+            'orderby' => isset($params['orderby']) ? $params['orderby'] : '',
+            'order' => isset($params['order']) ? $params['order'] : '',
+            'featured' => isset($params['featured']) ? $params['featured'] : '',
+            'on_sale' => isset($params['on_sale']) ? $params['on_sale'] : '',
+            'min_price' => isset($params['min_price']) ? $params['min_price'] : '',
+            'max_price' => isset($params['max_price']) ? $params['max_price'] : '',
+        );
+
+        return 'mstore_search_' . md5(json_encode($key_parts));
+    }
+
+    /**
+     * Get from cache using WordPress Transients API
+     *
+     * @param string $key Cache key
+     * @return mixed Cached data or false if not found/expired
+     */
+    private function get_cache($key) {
+        return get_transient($key);
+    }
+
+    /**
+     * Set cache with expiration using WordPress Transients API
+     *
+     * @param string $key Cache key
+     * @param mixed $data Data to cache
+     * @param int $expiration Expiration time in seconds (default: 30 minutes)
+     * @return bool True if successful
+     */
+    private function set_cache($key, $data, $expiration = 1800) {
+        // Default 30 minutes (1800 seconds)
+        return set_transient($key, $data, $expiration);
+    }
+
+    /**
+     * Clear all search cache
+     * Called when products are created, updated, or deleted
+     * Ensures users always see up-to-date product information
+     */
+    public function clear_search_cache() {
+        global $wpdb;
+
+        // Delete all transients starting with 'mstore_search_'
+        $wpdb->query(
+            "DELETE FROM {$wpdb->options}
+             WHERE option_name LIKE '_transient_mstore_search_%'
+             OR option_name LIKE '_transient_timeout_mstore_search_%'"
+        );
+
+        error_log("MStore API Optimizer: Cleared all search cache due to product update");
     }
 }
 
